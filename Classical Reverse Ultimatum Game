@@ -1,0 +1,217 @@
+# Libraries
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from tabulate import tabulate
+
+'''--------------------------
+Global Variables
+-----------------------------'''
+N_r=10 #Number of Responder
+N_p=10 #Number of Proposer
+TOTAL_EPISODES = 1000000
+MAX_OFFER = 9 #Maximum Value the Agent can Offer
+EPS_START = 1.0 #Explroation at the Starting
+EPS_DECAY = 0.9999 #Rate at which Explroation is Decayed
+EPS_MIN_PROP = 0.1 #Minimum Exploration for Proposer
+EPS_MIN_RESP = 0.1 #Minimum Exploration for Responder
+P_BREAK = 0 #Breakdown Probability
+ROLLING_WINDOW_SIZE = 2000
+
+# Action Set for Responders
+ACCEPT, REJECT = 0, 1
+
+# Population Q-Table
+R_qtable =[]
+P_qtable =[]
+for p in range(N_r):
+    R_qtable.append({'Q_resp': np.zeros((MAX_OFFER,2))})
+for p in range(N_p):
+    P_qtable.append({'Q_prop': np.zeros(MAX_OFFER)})
+eps_p = EPS_START
+eps_r = EPS_START
+
+# Count Tables
+R_count=[]
+P_count=[]
+for c in range(N_r):
+    R_count.append({'count': np.zeros((MAX_OFFER,2), dtype=int)})
+for c in range(N_p):
+    P_count.append({'count': np.zeros(MAX_OFFER, dtype=int)}) 
+
+# Exploration at End of Simulation
+print(EPS_DECAY**(TOTAL_EPISODES-1))
+
+
+'''--------------------------
+Negotiation
+-----------------------------'''
+s0=[]
+def episode(Q_prop, Q_resp, eps_p, eps_r):
+    if np.random.rand() < eps_p: # Proposer's Initial Offer Action
+        s0 = np.random.randint(1, MAX_OFFER + 1)
+    else:
+        max_value = np.max(Q_prop)
+        candidate_values = np.where(Q_prop == max_value)[0]
+        if len(candidate_values) == 1:
+            chosen_s0 = candidate_values[0]
+        else:
+            chosen_s0 = candidate_values[np.argmax(imm_acc[candidate_values])]
+        s0 = chosen_s0 + 1
+    initial = s0 #Chosen Initial Offer
+    s = s0 
+    hist_r = [] # History of the Responder [state,action]
+    
+    while True: # Responder/Proposer Loop
+        if np.random.rand() < eps_r: # Responder Choice
+            a_r = np.random.choice([0, 1])
+        else:
+            a_r = Q_resp[s-1].argmax()
+            
+        if a_r == ACCEPT:
+            hist_r.append((s, a_r))
+            return 10 - s, s, initial, hist_r # r_prop,r_resp
+        else: # a_r==REJECT
+            if np.random.rand() < P_BREAK:
+                hist_r.append((s, a_r))
+                return 0, 0, initial, hist_r
+            else: # 1-p_break
+                if s == MAX_OFFER:
+                    hist_r.append((s, a_r))
+                    return 0, 0, initial, hist_r
+                if s!= MAX_OFFER:
+                    tail = Q_prop[s:]
+                    max_tail = tail.max()
+                    tie_idxs = np.where(tail == max_tail)[0]
+                    jump = tie_idxs[-1] + 1  # +1 because tail[0] is offer s+1
+                    next_s = s + jump if tail[tie_idxs[-1]] > Q_prop[s] else s + 1
+                    hist_r.append((s, a_r))
+                    s = next_s
+
+
+'''--------------------------
+Simulation Flow
+-----------------------------'''
+ 
+#Variables
+proposer_initial_offer = []
+responder_accept_share = []
+
+for e in range(1,TOTAL_EPISODES+1):
+    
+    # At the start of an episode, chosing P-R Pair
+    proposer = np.random.randint(N_p)
+    responder = np.random.randint(N_r)
+    Q_prop_agent = P_qtable[proposer]['Q_prop']
+    Q_resp_agent = R_qtable[responder]['Q_resp']
+    count_prop = P_count[proposer]['count']
+    count_resp = R_count[responder]['count']
+
+    #Run Episode
+    r_prop, r_resp, initial, hist_r = episode(Q_prop_agent, Q_resp_agent, eps_p, eps_r)
+    #print('This is the history of the responder')
+    #print(hist_r)
+    
+    #Q-Value Update: Proposers
+    for s_hist, _ in hist_r:           
+        count_prop[s_hist-1] += 1
+        n = count_prop[s_hist-1]
+        Q_prop_agent[s_hist-1] += (r_prop - Q_prop_agent[s_hist-1]) / n
+        #if s_hist == ACCEPT:              # only the accepted price gets r_prop
+         #   Q_prop_agent[s_hist-1] += (r_prop - Q_prop_agent[s_hist-1]) / n
+        #else:                             # every rejected bid gets a 0
+         #   Q_prop_agent[s_hist-1] += (0  - Q_prop_agent[s_hist-1]) / n
+    
+    first_s, first_a = hist_r[0]
+    if first_a == ACCEPT:
+        imm_acc[first_s - 1] = imm_acc[first_s - 1] + 1
+    proposer_initial_offer.append(initial)
+    
+    # Q-Value Update: Responders
+    last_state, last_action = hist_r[-1]
+    reward = r_resp if last_action == ACCEPT else 0
+    for state, action in hist_r:
+        count_resp[state-1,action] = count_resp[state-1,action] + 1
+        n = count_resp[state-1,action]
+        #print(state,action)
+        Q_resp_agent[state-1, action] = Q_resp_agent[state-1, action] + (reward - Q_resp_agent[state-1, action])/n
+    responder_accept_share.append(r_resp)
+
+    #Exploration Rates
+    eps_p = max(EPS_MIN_PROP, eps_p * EPS_DECAY)
+    eps_r = max(EPS_MIN_RESP, eps_r * EPS_DECAY)
+    if e > 300000:
+        eps_p = 0
+        eps_r = 0
+
+
+#Mean Calculation
+avg_prop = np.mean([a['Q_prop'] for a in P_qtable], axis=0)
+df_prop = pd.DataFrame({'offer': np.arange(1, MAX_OFFER+1), 'Q-Value': avg_prop})
+
+avg_resp = np.mean([a['Q_resp'] for a in R_qtable], axis=0)[::]  # shape (9,2)
+df_resp = pd.DataFrame(
+    avg_resp,
+    index=np.arange(1, MAX_OFFER+1),
+    columns=['accept', 'reject']
+).reset_index().rename(columns={'index': 'offer'})
+
+df_resp = pd.DataFrame(
+    avg_resp,
+    index=np.arange(1, avg_resp.shape[0]+1),
+    columns=['Accept','Reject'])
+
+
+'''--------------------------
+Generating Figures/Tables
+-----------------------------'''
+
+# Average Rewards for Proposer and Responder
+moving_avg_resp_reward = pd.Series(responder_accept_share).rolling(window=ROLLING_WINDOW_SIZE).mean().dropna()
+moving_avg_prop_reward = pd.Series(proposer_initial_offer).apply(lambda x: 10 - x).rolling(window=ROLLING_WINDOW_SIZE).mean().dropna()
+x_axis_rolling_avg = np.arange(ROLLING_WINDOW_SIZE, len(responder_accept_share) + 1)
+plt.figure(figsize=(10, 6))
+plt.plot(x_axis_rolling_avg, moving_avg_resp_reward, 'r', label=f'Responder Avg Reward (rolling over {ROLLING_WINDOW_SIZE})')
+plt.plot(x_axis_rolling_avg, moving_avg_prop_reward, 'b', label=f'Proposer Avg Reward (rolling over {ROLLING_WINDOW_SIZE})')
+plt.xlabel('Episode')
+plt.ylabel('Average Reward')
+plt.yticks(np.arange(1, 10))
+plt.title('Reward Convergence for Proposer and Responder')
+plt.grid(True, linestyle='--', alpha=0.7)
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+
+# Proposer average Q-values by offer
+offers = np.arange(1, MAX_OFFER+1)
+plt.figure(figsize=(8,4))
+plt.plot(offers, df_prop['Q-Value'], marker='o', label='Proposer Avg Q')
+plt.xticks(offers)
+plt.xlabel('Offer')
+plt.yticks(np.arange(1,10,0.5))
+plt.ylabel('Average Q-Value')
+plt.title('Average Proposer Q-Values')
+plt.grid(alpha=0.3)
+plt.legend()
+plt.show()
+
+# Responder average Q-values by offer
+plt.figure(figsize=(8,4))
+plt.plot(offers, df_resp['accept'], marker='o', label='Accept Q')
+plt.plot(offers, df_resp['reject'], marker='s', label='Reject Q')
+plt.xticks(offers)
+plt.xlabel('Offer')
+plt.ylabel('Average Q-Value')
+plt.yticks(np.arange(1,MAX_OFFER+1,0.5))
+plt.title('Average Responder Q-Values')
+plt.grid(alpha=0.3)
+plt.legend()
+plt.show()
+
+
+print("Average Proposer Q-Table")
+print(tabulate(df_prop, headers='keys', tablefmt='psql', floatfmt=".2f"))
+
+print("\nAverage Responder Q-Table")
+print(tabulate(df_resp, headers='keys', tablefmt='psql', floatfmt=".2f"))
