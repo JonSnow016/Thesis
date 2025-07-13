@@ -1,0 +1,197 @@
+'''--------------------------
+Libraries
+-----------------------------'''
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from tabulate import tabulate
+
+
+'''--------------------------
+Global Variables
+-----------------------------'''
+MAX_OFFER = 9
+P_BREAK = 0.18
+MUTATION_RATE = 0.05
+N_p = 100
+N_r = 100
+MIN_INTERACTIONS = 500
+TOTAL_GENERATIONS = 2000
+REPLACEMENT_FRACTION = 0.30  # 30% of responders replaced each generation
+
+# Frequency Distribution for Responder Population
+THRESHOLD_MAPPING = {'T5': 5, 'T6': 6, 'T7': 7, 'T8': 8}
+R_ratio = {'T5': 0.7, 'T6': 0.1, 'T7': 0.1, 'T8': 0.1}
+
+# Responder Population
+R_type = []
+R_mutant = np.zeros(N_r, dtype=int)  # 0 = normal, 1 = mutant
+for t, ratio in R_ratio.items():
+    R_type += [t] * int(N_r * ratio)
+R_type += [np.random.choice(list(R_ratio.keys())) for _ in range(N_r - len(R_type))]
+np.random.shuffle(R_type)
+
+# Initialize proposer types: 0 = normal, 1 = mutant
+P_type = [0] * N_p
+P_mutant_flag = np.zeros(N_p, dtype=int)
+proposer_offer_memory = [None] * N_p
+
+responder_total_reward = np.zeros(N_r)
+responder_count = np.zeros(N_r)
+RESPONDER_HISTORY = [[] for _ in range(N_r)]
+RESPONDER_HISTORY_LENGTH = [1 for _ in range(N_r)]
+
+reward_data = {t: [] for t in THRESHOLD_MAPPING.keys()}
+freq_data = []
+generation_tracker = []
+detailed_results = []
+
+
+'''--------------------------
+Negotiation
+-----------------------------'''
+def get_offer_from_history(history, length):
+    history = history[-length:]
+    if not history:
+        return 1
+    accepts = [s for (s, r) in history if r == 'A']
+    rejects = [s for (s, r) in history if r == 'R']
+    if accepts and not rejects:
+        return max(1, min(accepts) - 1)
+    elif rejects and not accepts:
+        return min(MAX_OFFER, max(rejects) + 1)
+    elif accepts and rejects:
+        min_accept = min(accepts)
+        max_reject = max(rejects)
+        return min_accept if min_accept - max_reject == 1 else max_reject + 1
+    else:
+        return 1
+
+def episode(r_idx, offer):
+    s = offer
+    threshold = THRESHOLD_MAPPING[R_type[r_idx]]
+    while True:
+        if s >= threshold:
+            RESPONDER_HISTORY[r_idx].append((s, 'A'))
+            return 10 - s, s, 'A'
+        else:
+            RESPONDER_HISTORY[r_idx].append((s, 'R'))
+            if np.random.rand() < P_BREAK or s == MAX_OFFER:
+                return 0, 0, 'R'
+            s += 1
+
+
+'''--------------------------
+Simulation Flow
+-----------------------------'''
+generation = 0
+
+while generation < TOTAL_GENERATIONS:
+    responder_interaction_counts = np.zeros(N_r)
+
+    while not np.all(responder_interaction_counts >= MIN_INTERACTIONS):
+        proposer = np.random.randint(N_p)
+        responder = np.random.randint(N_r)
+        if responder_interaction_counts[responder] >= MIN_INTERACTIONS:
+            continue
+
+        if P_type[proposer] == 0:
+            offer = get_offer_from_history(RESPONDER_HISTORY[responder], RESPONDER_HISTORY_LENGTH[responder])
+        else:
+            if proposer_offer_memory[proposer] is None:
+                proposer_offer_memory[proposer] = np.random.randint(1, MAX_OFFER + 1)
+            offer = proposer_offer_memory[proposer]
+
+        r_prop, r_resp, result = episode(responder, offer)
+
+        if P_type[proposer] == 1 and result == 'R':
+            proposer_offer_memory[proposer] = min(MAX_OFFER, proposer_offer_memory[proposer] + 1)
+
+        if r_resp > 0:
+            responder_total_reward[responder] += r_resp
+        responder_count[responder] += 1
+        responder_interaction_counts[responder] += 1
+
+    # Average Rewards Calculation
+    avg_rewards = responder_total_reward / np.maximum(responder_count, 1)
+    fitness = np.clip(avg_rewards, a_min=0.01, a_max=None)
+    prob_selection = fitness / fitness.sum()
+
+    num_replace = int(REPLACEMENT_FRACTION * N_r)
+    replace_indices = np.random.choice(np.arange(N_r), size=num_replace, replace=False)
+    chosen = np.random.choice(np.arange(N_r), size=num_replace, p=prob_selection)
+
+    # Replacement Mechanism
+    for idx, new_idx in zip(replace_indices, chosen):
+        R_type[idx] = R_type[new_idx]
+        RESPONDER_HISTORY[idx] = []
+        RESPONDER_HISTORY_LENGTH[idx] = RESPONDER_HISTORY_LENGTH[new_idx]
+        R_mutant[idx] = 0
+        if np.random.rand() < MUTATION_RATE:
+            R_type[idx] = np.random.choice(list(THRESHOLD_MAPPING.keys()))
+            RESPONDER_HISTORY_LENGTH[idx] = 3
+            R_mutant[idx] = 1
+        responder_total_reward[idx] = 0
+        responder_count[idx] = 0
+
+    # Mutation
+    for i in range(N_p):
+        if np.random.rand() < MUTATION_RATE:
+            P_type[i] = 1
+            P_mutant_flag[i] = 1
+            proposer_offer_memory[i] = None
+        else:
+            P_type[i] = 0
+            P_mutant_flag[i] = 0
+            proposer_offer_memory[i] = None
+
+    freq_data.append(pd.Series(R_type).value_counts(normalize=True).to_dict())
+    reward_df = pd.DataFrame({'Responder Type': R_type, 'Reward': avg_rewards})
+    rewards = reward_df.groupby('Responder Type')['Reward'].mean().to_dict()
+    for k in reward_data:
+        reward_data[k].append(rewards.get(k, 0))
+
+    snapshot = {'generation': generation, 'rewards': rewards, 'histories': {}}
+    for rtype in THRESHOLD_MAPPING.keys():
+        indices = [i for i, t in enumerate(R_type) if t == rtype]
+        if indices:
+            chosen = random.choice(indices)
+            snapshot['histories'][rtype] = RESPONDER_HISTORY[chosen][-15:]  # last 15 events only
+    detailed_results.append(snapshot)
+
+    generation_tracker.append(responder_interaction_counts.copy())
+    generation += 1
+
+'''--------------------------
+Plot Generation
+-----------------------------'''
+# Plot for Frequency Distribution
+pd.DataFrame(freq_data).fillna(0).plot(figsize=(10, 5))
+plt.title('Responder Type Frequency Over Generations')
+plt.xlabel('Generation')
+plt.ylabel('Proportion')
+plt.grid(True)
+plt.tight_layout()
+plt.show()
+
+# Final generation episode count
+print("\nEpisodes per Responder in Last Generation:")
+print(generation_tracker[-1])
+
+
+# Random Sample 25 Responders for Observing Reputation Table
+sample_indices = np.random.choice(np.arange(N_r), size=25, replace=False)
+history_table = []
+for idx in sample_indices:
+    history_row = [f"Responder {idx}"] + RESPONDER_HISTORY[idx]
+    history_table.append(history_row)
+
+max_len = max(len(row) for row in history_table)
+for row in history_table:
+    while len(row) < max_len:
+        row.append("")
+
+headers = ["Responder"] + [f"Round {i+1}" for i in range(max_len - 1)]
+
+print("\nSample Responder Histories (25 Responders):")
+print(tabulate(history_table, headers=headers, tablefmt='psql'))
